@@ -151,12 +151,37 @@ class LinkedInScraper:
                 if website_elem and website_elem.get("href"):
                     website = website_elem["href"]
                 
+                # Check for explicit Website dt/dd pair
                 if website == "N/A" or "linkedin.com" in website:
+                    dts = soup.find_all("dt")
+                    for dt in dts:
+                        if "website" in dt.get_text(strip=True).lower():
+                            dd = dt.find_next_sibling("dd")
+                            if dd:
+                                a_tag = dd.find("a", href=True)
+                                if a_tag:
+                                    website = a_tag["href"]
+                                else:
+                                    website = dd.get_text(strip=True)
+                            break
+                            
+                # Fallback: look for ?trk=public_profile_website
+                if website == "N/A" or "linkedin.com" in website:
+                    for a in soup.find_all("a", href=True):
+                        href = a["href"]
+                        if "?trk=public_profile_website" in href or "?trk=public_profile_topcard-website" in href:
+                            website = href
+                            break
+                            
+                # Last resort fallback: first external link that is NOT a generic search/app link
+                if website == "N/A" or "linkedin.com" in website:
+                    ignore_domains = ["linkedin.com", "bing.com", "microsoft.com", "apple.com", "google.com", "android.com"]
                     all_links = soup.find_all("a", href=True)
                     for link in all_links:
-                        href = link["href"]
-                        if "http" in href and "linkedin.com" not in href:
-                            website = href
+                        href = link["href"].lower()
+                        if href.startswith("http") and not any(domain in href for domain in ignore_domains):
+                            # It's a real external link
+                            website = link["href"]
                             break
 
                 location = "N/A"
