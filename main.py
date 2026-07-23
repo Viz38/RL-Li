@@ -11,7 +11,8 @@ from typing import Any, Dict, List, Optional
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from camoufox.sync_api import Camoufox
+import requests
+from bs4 import BeautifulSoup
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Configure structured logging
@@ -98,138 +99,102 @@ def wait_for_internet():
 
 
 class LinkedInScraper:
-    """Encapsulates the scraping logic using Camoufox."""
-
-    @staticmethod
-    def human_scroll(page):
-        """Mimics human scrolling behavior."""
-        try:
-            current_scroll = 0
-            while current_scroll < 800:
-                step = random.randint(200, 400)
-                current_scroll += step
-                page.evaluate(f"window.scrollTo(0, {current_scroll})")
-                time.sleep(random.uniform(0.1, 0.3))
-        except Exception as e:
-            logger.debug(f"Scrolling error (ignored): {e}")
-
-    @staticmethod
-    def human_interaction(page):
-        """Random mouse movements or waits."""
-        try:
-            for _ in range(random.randint(1, 2)):
-                x, y = random.randint(100, 700), random.randint(100, 500)
-                page.mouse.move(x, y)
-                time.sleep(random.uniform(0.1, 0.2))
-        except Exception as e:
-            logger.debug(f"Interaction error (ignored): {e}")
+    """Encapsulates the scraping logic using requests and BeautifulSoup."""
 
     @classmethod
     def scrape_url(cls, url: str) -> Dict[str, Any]:
-        """Worker function to scrape a single URL with high stealth."""
+        """Worker function to scrape a single URL using simple HTTP requests."""
         max_retries = 3
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+        
         for attempt in range(max_retries):
             wait_for_internet()
             try:
-                with Camoufox(headless=True) as browser:
-                    page = browser.new_page()
-                    time.sleep(random.uniform(0.5, 1.5))
-                    
-                    try:
-                        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                    except Exception as e:
-                        if "ERR_INTERNET_DISCONNECTED" in str(e) or "ERR_NAME_NOT_RESOLVED" in str(e):
-                            logger.warning(f"Internet error on {url}. Retrying...")
-                            wait_for_internet()
-                            continue
-                        raise e
-                    
-                    page_content = page.content().lower()
-                    if "error 1015" in page_content or ("cloudflare" in page.title().lower() and "1015" in page_content):
-                        logger.warning(f"Cloudflare Error 1015 detected for {url}. Retrying ({attempt + 1}/{max_retries})...")
-                        time.sleep(random.uniform(5, 10))
+                response = requests.get(url, headers=headers, timeout=15)
+                response.raise_for_status()
+                
+                soup = BeautifulSoup(response.text, "html.parser")
+                
+                # If we hit an authwall, the title usually indicates a login page
+                if "login" in response.url.lower() or "authwall" in response.url.lower():
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Login wall detected for {url}. Retrying ({attempt + 1}/{max_retries})...")
+                        time.sleep(random.uniform(2, 5))
                         continue
-                    
-                    cls.human_interaction(page)
-                    cls.human_scroll(page)
-                    
-                    if "authwall" in page.url or "login" in page.url:
-                        if attempt < max_retries - 1:
-                            logger.warning(f"Login wall detected for {url}. Retrying ({attempt + 1}/{max_retries})...")
-                            time.sleep(random.uniform(2, 5))
-                            continue
-                        return {"url": url, "error": "Login wall", "status": "error"}
+                    return {"url": url, "error": "Login wall", "status": "error"}
 
-                    # Extraction Logic
-                    name = page.locator("h1").first.inner_text().strip() if page.locator("h1").count() > 0 else "N/A"
-                    if name == "N/A":
-                        if attempt < max_retries - 1:
-                            logger.warning(f"Failed to scrape data (Name not found) for {url}. Retrying ({attempt + 1}/{max_retries})...")
-                            time.sleep(random.uniform(2, 5))
-                            continue
-                        return {"url": url, "error": "Name not found (scraping failed)", "status": "error"}
-                    
-                    bio = "N/A"
-                    for sel in ["p.about-us__description", "section.about-us p", ".top-card-layout__second-subline"]:
-                        if page.locator(sel).count() > 0:
-                            bio = page.locator(sel).first.inner_text().strip()
+                # Extraction Logic
+                name_elem = soup.select_one("h1.top-card-layout__title, h1")
+                name = name_elem.get_text(strip=True) if name_elem else "N/A"
+                
+                if name == "N/A":
+                    if attempt < max_retries - 1:
+                        logger.warning(f"Failed to scrape data (Name not found) for {url}. Retrying ({attempt + 1}/{max_retries})...")
+                        time.sleep(random.uniform(2, 5))
+                        continue
+                    return {"url": url, "error": "Name not found (scraping failed)", "status": "error"}
+                
+                bio = "N/A"
+                for sel in ["p.about-us__description", "section.about-us p", ".top-card-layout__second-subline"]:
+                    bio_elem = soup.select_one(sel)
+                    if bio_elem:
+                        bio = bio_elem.get_text(strip=True)
+                        break
+
+                website = "N/A"
+                website_elem = soup.select_one("a.about-us__link")
+                if website_elem and website_elem.get("href"):
+                    website = website_elem["href"]
+                
+                if website == "N/A" or "linkedin.com" in website:
+                    all_links = soup.find_all("a", href=True)
+                    for link in all_links:
+                        href = link["href"]
+                        if "http" in href and "linkedin.com" not in href:
+                            website = href
                             break
 
-                    website = "N/A"
-                    if page.locator("a.about-us__link").count() > 0:
-                        website = page.locator("a.about-us__link").first.get_attribute("href")
-                    if website == "N/A" or "linkedin.com" in website:
-                        all_links = page.locator("a").all()
-                        for link in all_links:
-                            href = link.get_attribute("href")
-                            if href and "http" in href and "linkedin.com" not in href:
-                                website = href
-                                break
+                location = "N/A"
+                sublines = soup.select(".top-card-layout__first-subline, .top-card-layout__second-subline")
+                for subline in sublines:
+                    text = subline.get_text(strip=True)
+                    cleaned = re.sub(r"\s+\d+(?:,\d+)?(?:\s+followers)?.*", "", text, flags=re.IGNORECASE).strip()
+                    if "," in cleaned:
+                        location = cleaned
+                        break
 
-                    location = "N/A"
-                    sublines = page.locator(".top-card-layout__first-subline, .top-card-layout__second-subline").all_inner_texts()
-                    for line in sublines:
-                        cleaned = re.sub(r"\s+\d+(?:,\d+)?(?:\s+followers)?.*", "", line, flags=re.IGNORECASE).strip()
-                        if "," in cleaned:
-                            location = cleaned
-                            break
+                founded = "N/A"
+                dts = soup.find_all("dt")
+                for dt in dts:
+                    if "founded" in dt.get_text(strip=True).lower():
+                        dd = dt.find_next_sibling("dd")
+                        if dd:
+                            founded = dd.get_text(strip=True)
+                        break
 
-                    founded = page.evaluate('''() => {
-                        let dts = document.querySelectorAll('dt');
-                        for (let i = 0; i < dts.length; i++) {
-                            if (dts[i].innerText.toLowerCase().includes('founded')) {
-                                let next = dts[i].nextElementSibling;
-                                if (next && next.tagName.toLowerCase() === 'dd') {
-                                    return next.innerText.trim();
-                                }
-                            }
-                        }
-                        return "N/A";
-                    }''')
+                if website != "N/A":
+                    match = re.search(r"https?://(?:www\.)?([^/]+)", website)
+                    if match:
+                        website = match.group(1)
 
-                    if founded is None:
-                        founded = "N/A"
+                data = {
+                    "url": url,
+                    "name": name,
+                    "bio": bio,
+                    "website": website,
+                    "location": location,
+                    "founded": founded,
+                    "status": "completed",
+                    "error": None
+                }
+                
+                logger.info(f"Finished scraping: {name} ({url})")
+                return data
 
-                    if website != "N/A":
-                        match = re.search(r"https?://(?:www\.)?([^/]+)", website)
-                        if match:
-                            website = match.group(1)
-
-                    data = {
-                        "url": url,
-                        "name": name,
-                        "bio": bio,
-                        "website": website,
-                        "location": location,
-                        "founded": founded,
-                        "status": "completed",
-                        "error": None
-                    }
-                    
-                    logger.info(f"Finished scraping: {name} ({url})")
-                    return data
-
-            except Exception as e:
+            except requests.RequestException as e:
                 if attempt < max_retries - 1:
                     logger.warning(f"Error {url}: {str(e)}. Retrying ({attempt + 1}/{max_retries})...")
                     wait_for_internet()
@@ -237,6 +202,9 @@ class LinkedInScraper:
                 else:
                     logger.error(f"Error {url}: {str(e)}. Max retries reached.")
                     return {"url": url, "error": str(e), "status": "error"}
+            except Exception as e:
+                logger.error(f"Error {url}: {str(e)}.")
+                return {"url": url, "error": str(e), "status": "error"}
                     
         return {"url": url, "error": "Max retries exceeded", "status": "error"}
 
